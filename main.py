@@ -14,7 +14,7 @@ TARGET_DIR = "/AstrBot/data/files/tmp"  # 移动后的目录
 MIN_SIZE = 512 * 1024  # 最小大小（字节），如 100KB
 HASH_APPEND_LEN = 16  # 改 hash 用的随机长度
 RENAME_LEN = 32  # 重命名随机长度
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp",".gif")
 
 
 # ===============================================
