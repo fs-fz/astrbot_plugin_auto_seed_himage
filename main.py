@@ -63,7 +63,7 @@ def process_one_image(
     append_random_bytes(img_path, HASH_APPEND_LEN)
 
     # 3. 判断大小，过小就图种
-    if os.path.getsize(img_path) < min_size:
+    while os.path.getsize(img_path) < min_size:
         make_self_image_seed(img_path)
 
     # 4. 随机重命名
