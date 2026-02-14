@@ -9,8 +9,8 @@ import string
 import shutil
 
 # ================== 可配置变量 ==================
-SOURCE_DIR = "/AstrBot/data/files/source"  # 随机选图的目录
-TARGET_DIR = "/AstrBot/data/files/tmp"  # 移动后的目录
+SOURCE_DIR = "/AstrBot/files/source"  # 随机选图的目录
+TARGET_DIR = "/AstrBot/files/tmp"  # 移动后的目录
 MIN_SIZE = 512 * 1024  # 最小大小（字节），如 100KB
 HASH_APPEND_LEN = 16  # 改 hash 用的随机长度
 RENAME_LEN = 32  # 重命名随机长度
