@@ -17,6 +17,12 @@
     "hint": "目录不存在时插件会自动创建。",
     "default": "/AstrBot/files/tmp"
   },
+  "merge_forward": {
+    "type": "bool",
+    "description": "打包成聊天记录",
+    "hint": "开启后，在支持合并转发的 QQ/OneBot 平台上将本次请求的图片打包成一条聊天记录；其他平台仍逐张发送。",
+    "default": false
+  },
   "access_mode": {
     "type": "string",
     "description": "用户访问控制模式",

@@ -8,6 +8,7 @@
 
 - 从本地目录随机选择图片
 - 支持一次发送多张图片
+- 支持将多张图片打包成合并转发聊天记录
 - 可配置单次请求数量上限
 - 支持用户黑名单或白名单访问控制
 - 通过追加随机字节修改图片文件哈希
@@ -71,10 +72,17 @@ git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
 | `max_images` | `10` | 单次请求图片数量上限，最小有效值为 1 |
 | `source_dir` | `/AstrBot/files/source` | 图片来源目录 |
 | `target_dir` | `/AstrBot/files/tmp` | 处理后图片目录 |
+| `merge_forward` | `false` | 是否打包成聊天记录 |
 | `access_mode` | `disabled` | 访问控制模式 |
 | `user_ids` | `[]` | 用于黑名单或白名单匹配的用户 ID |
 
 修改后需要重载或重启插件。
+
+### 合并转发
+
+开启 `merge_forward` 后，一次 `/img N` 请求中的每张图片会成为一个聊天记录节点，并打包为一条合并转发消息。
+
+合并转发目前仅用于 QQ/OneBot 类平台，包括 `aiocqhttp`、`onebot`、`qq` 和 `qq_official`。其他平台会自动回退为逐张发送，避免因平台不支持 `Nodes` 消息组件而发送失败。
 
 ### 黑白名单
 

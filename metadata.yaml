@@ -1,6 +1,6 @@
 name: astrbot_plugin_auto_seed_himage
 display_name: 本地随机图片
-desc: 从本地目录随机处理并发送图片，支持数量限制和用户黑白名单。
-version: v1.4.0
+desc: 从本地目录随机处理并发送图片，支持合并转发、数量限制和用户黑白名单。
+version: v1.5.0
 author: fsfz
 repo: https://github.com/fs-fz/astrbot_plugin_auto_seed_himage

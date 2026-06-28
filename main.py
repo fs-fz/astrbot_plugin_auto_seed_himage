@@ -5,6 +5,7 @@ import string
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Image, Node, Nodes
 from astrbot.api.star import Context, Star, register
 
 DEFAULT_SOURCE_DIR = "/AstrBot/files/source"
@@ -14,6 +15,12 @@ MIN_SIZE = 512 * 1024
 HASH_APPEND_LEN = 16
 RENAME_LEN = 32
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+MERGE_FORWARD_PLATFORMS = {
+    "aiocqhttp",
+    "onebot",
+    "qq",
+    "qq_official",
+}
 
 
 def rand_str(n: int) -> str:
@@ -84,11 +91,33 @@ def get_positive_int(config: AstrBotConfig, key: str, default: int) -> int:
         return default
 
 
+def make_image_component(file_path: str) -> Image:
+    if hasattr(Image, "fromFileSystem"):
+        return Image.fromFileSystem(file_path)
+    if hasattr(Image, "fromFile"):
+        return Image.fromFile(file_path)
+    return Image(file=file_path)
+
+
+def make_forward_result(event: AstrMessageEvent, image_paths: list[str]):
+    node_name = event.get_sender_name() or "随机图片"
+    node_uin = str(event.get_sender_id() or "")
+    nodes = [
+        Node(
+            content=[make_image_component(image_path)],
+            name=node_name,
+            uin=node_uin,
+        )
+        for image_path in image_paths
+    ]
+    return event.chain_result([Nodes(nodes=nodes)])
+
+
 @register(
     "astrbot_plugin_auto_seed_himage",
     "fsfz",
     "从本地获取随机图片。使用 /img 数量 获取图片。",
-    "1.4.0",
+    "1.5.0",
 )
 class SetuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -128,9 +157,35 @@ class SetuPlugin(Star):
             or DEFAULT_TARGET_DIR
         ).strip()
 
+        merge_forward = bool(self.config.get("merge_forward", False))
+        platform_name = str(event.get_platform_name()).lower()
+        use_merge_forward = (
+            merge_forward
+            and platform_name in MERGE_FORWARD_PLATFORMS
+        )
+
+        if not use_merge_forward:
+            try:
+                for _ in range(num):
+                    image_path = process_one_image(
+                        source_dir,
+                        target_dir,
+                        MIN_SIZE,
+                    )
+                    yield event.image_result(image_path)
+            except Exception as e:
+                yield event.plain_result(f"请求失败: {e}")
+            return
+
+        image_paths = []
         try:
             for _ in range(num):
                 image_path = process_one_image(source_dir, target_dir, MIN_SIZE)
-                yield event.image_result(image_path)
+                image_paths.append(image_path)
         except Exception as e:
+            if image_paths:
+                yield make_forward_result(event, image_paths)
             yield event.plain_result(f"请求失败: {e}")
+            return
+
+        yield make_forward_result(event, image_paths)
