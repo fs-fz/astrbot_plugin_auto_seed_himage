@@ -1,0 +1,37 @@
+{
+  "max_images": {
+    "type": "int",
+    "description": "单次请求图片数量上限",
+    "hint": "用户通过 /img 请求的数量不能超过此值，最小有效值为 1。",
+    "default": 10
+  },
+  "source_dir": {
+    "type": "string",
+    "description": "图片来源目录",
+    "hint": "该目录必须存在，且 AstrBot 进程需要拥有读写权限。",
+    "default": "/AstrBot/files/source"
+  },
+  "target_dir": {
+    "type": "string",
+    "description": "处理后图片目录",
+    "hint": "目录不存在时插件会自动创建。",
+    "default": "/AstrBot/files/tmp"
+  },
+  "access_mode": {
+    "type": "string",
+    "description": "用户访问控制模式",
+    "hint": "disabled：不限制；blacklist：拒绝名单内用户；whitelist：只允许名单内用户。",
+    "options": [
+      "disabled",
+      "blacklist",
+      "whitelist"
+    ],
+    "default": "disabled"
+  },
+  "user_ids": {
+    "type": "list",
+    "description": "用户 ID 名单",
+    "hint": "填写消息平台的用户 ID。名单的作用由访问控制模式决定，ID 会按字符串精确匹配。",
+    "default": []
+  }
+}
