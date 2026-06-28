@@ -80,6 +80,23 @@
         "type": "string",
         "description": "聊天记录节点名称",
         "default": "每日图片"
+      },
+      "send_interval": {
+        "type": "int",
+        "description": "发送间隔（秒）",
+        "hint": "群与群、同一群多张图片之间的等待时间，用于降低 QQ 风控和富媒体上传失败概率。",
+        "default": 3
+      },
+      "retry_count": {
+        "type": "int",
+        "description": "失败重试次数",
+        "hint": "单条图片或整包聊天记录发送失败后的额外重试次数，设为 0 可关闭重试。",
+        "default": 1
+      },
+      "retry_delay": {
+        "type": "int",
+        "description": "重试等待时间（秒）",
+        "default": 5
       }
     }
   }

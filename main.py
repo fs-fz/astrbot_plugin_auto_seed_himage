@@ -7,7 +7,7 @@ from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Image, Node, Nodes
+from astrbot.api.message_components import Image, Node, Nodes, Plain
 from astrbot.api.star import Context, Star, register
 
 DEFAULT_SOURCE_DIR = "/AstrBot/files/source"
@@ -26,6 +26,11 @@ MERGE_FORWARD_PLATFORMS = {
 }
 DAILY_STATE_KEY = "daily_push_last_slot"
 SCHEDULER_INTERVAL_SECONDS = 20
+EMPTY_IMAGE_NOTIFY_TARGET = "default:FriendMessage:393691734"
+
+
+class NoImagesError(RuntimeError):
+    pass
 
 
 def rand_str(n: int) -> str:
@@ -34,13 +39,15 @@ def rand_str(n: int) -> str:
 
 
 def pick_random_image(dir_path: str) -> str:
+    if not os.path.isdir(dir_path):
+        raise NoImagesError(f"来源目录不存在: {dir_path}")
     imgs = [
         f for f in os.listdir(dir_path)
         if f.lower().endswith(IMAGE_EXTS)
         and os.path.isfile(os.path.join(dir_path, f))
     ]
     if not imgs:
-        raise RuntimeError("目录中没有可用图片")
+        raise NoImagesError(f"来源目录中没有可用图片: {dir_path}")
     return os.path.join(dir_path, random.choice(imgs))
 
 
@@ -96,6 +103,13 @@ def is_user_allowed(access_mode: str, user_ids: list, sender_id: str) -> bool:
 def get_positive_int(config: AstrBotConfig, key: str, default: int) -> int:
     try:
         return max(1, int(config.get(key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_non_negative_int(config: dict, key: str, default: int) -> int:
+    try:
+        return max(0, int(config.get(key, default)))
     except (TypeError, ValueError):
         return default
 
@@ -188,7 +202,7 @@ def target_supports_merge_forward(target: str) -> bool:
     "astrbot_plugin_auto_seed_himage",
     "fsfz",
     "从本地获取随机图片。使用 /img 数量 获取图片。",
-    "1.7.0",
+    "1.7.3",
 )
 class SetuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -197,6 +211,7 @@ class SetuPlugin(Star):
         self._scheduler_task = None
         self._last_daily_run_slot = ""
         self._last_invalid_daily_times = None
+        self._last_daily_source_empty = False
 
     async def initialize(self):
         """启动每日主动发送调度器。"""
@@ -274,6 +289,7 @@ class SetuPlugin(Star):
             await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
 
     async def _run_daily_push(self, daily_config: dict) -> bool:
+        self._last_daily_source_empty = False
         group_ids = daily_config.get("group_ids", [])
         targets = build_group_targets(group_ids)
         if not targets:
@@ -296,28 +312,69 @@ class SetuPlugin(Star):
             or DEFAULT_TARGET_DIR
         ).strip()
 
-        image_paths = []
-        try:
-            for _ in range(image_count):
-                image_paths.append(
-                    process_one_image(source_dir, target_dir, MIN_SIZE)
-                )
-        except Exception as e:
-            if not image_paths:
-                logger.error(f"每日图片处理失败: {e}", exc_info=True)
-                return False
-            logger.warning(
-                f"每日图片仅成功处理 {len(image_paths)} 张，将发送已有图片: {e}"
-            )
-
         merge_forward = bool(daily_config.get("merge_forward", False))
         forward_name = str(
             daily_config.get("forward_name", "每日图片")
             or "每日图片"
         ).strip()
+        send_interval = get_non_negative_int(
+            daily_config,
+            "send_interval",
+            3,
+        )
+        retry_count = get_non_negative_int(
+            daily_config,
+            "retry_count",
+            1,
+        )
+        retry_delay = get_non_negative_int(
+            daily_config,
+            "retry_delay",
+            5,
+        )
 
         sent_any = False
-        for target in targets:
+        processed_count = 0
+        successful_targets = 0
+        for target_index, target in enumerate(targets):
+            image_paths = []
+            source_empty = False
+            try:
+                for _ in range(image_count):
+                    image_paths.append(
+                        process_one_image(
+                            source_dir,
+                            target_dir,
+                            MIN_SIZE,
+                        )
+                    )
+            except NoImagesError as e:
+                source_empty = True
+                self._last_daily_source_empty = True
+                logger.warning(str(e))
+                if not image_paths:
+                    await self._notify_no_images(
+                        source_dir,
+                        "每日图片发送",
+                    )
+                    break
+                logger.warning(
+                    f"目标 {target} 仅抽取到 {len(image_paths)} 张，"
+                    "发送已有图片后终止本次每日任务。"
+                )
+            except Exception as e:
+                if not image_paths:
+                    logger.error(
+                        f"每日图片处理失败，跳过目标 {target}: {e}",
+                        exc_info=True,
+                    )
+                    continue
+                logger.warning(
+                    f"目标 {target} 仅成功处理 {len(image_paths)} 张，"
+                    f"将发送已有图片: {e}"
+                )
+            processed_count += len(image_paths)
+
             try:
                 if merge_forward and target_supports_merge_forward(target):
                     nodes = [
@@ -328,36 +385,102 @@ class SetuPlugin(Star):
                         )
                         for image_path in image_paths
                     ]
-                    sent = await self.context.send_message(
+                    sent = await self._send_daily_message(
                         target,
                         make_message_chain([Nodes(nodes=nodes)]),
+                        retry_count,
+                        retry_delay,
                     )
                 else:
                     sent = True
-                    for image_path in image_paths:
-                        current_sent = await self.context.send_message(
+                    for image_index, image_path in enumerate(image_paths):
+                        current_sent = await self._send_daily_message(
                             target,
                             make_message_chain(
                                 [make_image_component(image_path)]
                             ),
+                            retry_count,
+                            retry_delay,
                         )
                         sent = sent and current_sent
+                        if (
+                            send_interval
+                            and image_index < len(image_paths) - 1
+                        ):
+                            await asyncio.sleep(send_interval)
 
                 if not sent:
-                    logger.warning(f"未找到每日图片目标会话: {target}")
+                    logger.error(f"每日图片未能发送到目标: {target}")
                 else:
                     sent_any = True
+                    successful_targets += 1
             except Exception as e:
                 logger.error(
                     f"向每日图片目标 {target} 发送失败: {e}",
                     exc_info=True,
                 )
+            if source_empty:
+                await self._notify_no_images(
+                    source_dir,
+                    "每日图片发送",
+                )
+                break
+            if send_interval and target_index < len(targets) - 1:
+                await asyncio.sleep(send_interval)
         if sent_any:
             logger.info(
-                f"每日图片发送完成: {len(image_paths)} 张, "
-                f"{len(targets)} 个目标"
+                f"每日图片发送完成: 共处理 {processed_count} 张, "
+                f"{successful_targets}/{len(targets)} 个目标成功"
             )
         return sent_any
+
+    async def _notify_no_images(
+        self,
+        source_dir: str,
+        trigger: str,
+    ) -> None:
+        message = (
+            f"图片来源目录已无可用图片，{trigger}已终止。\n"
+            f"来源目录：{source_dir}"
+        )
+        try:
+            sent = await self.context.send_message(
+                EMPTY_IMAGE_NOTIFY_TARGET,
+                make_message_chain([Plain(message)]),
+            )
+            if not sent:
+                logger.error("未找到管理员私聊会话，无法发送无图片提醒。")
+        except Exception as e:
+            logger.error(f"发送无图片私聊提醒失败: {e}")
+
+    async def _send_daily_message(
+        self,
+        target: str,
+        message_chain: MessageChain,
+        retry_count: int,
+        retry_delay: int,
+    ) -> bool:
+        attempts = retry_count + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                if await self.context.send_message(target, message_chain):
+                    return True
+                error = RuntimeError("未找到匹配的平台会话")
+            except Exception as e:
+                error = e
+
+            if attempt < attempts:
+                logger.warning(
+                    f"每日图片发送失败，将重试 {target} "
+                    f"({attempt}/{attempts}): {error}"
+                )
+                if retry_delay:
+                    await asyncio.sleep(retry_delay)
+            else:
+                logger.error(
+                    f"每日图片发送最终失败 {target}: {error}"
+                )
+        return False
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("himg_daily_test")
@@ -368,7 +491,10 @@ class SetuPlugin(Star):
         if not normalize_group_ids(group_ids):
             yield event.plain_result("尚未配置每日发送目标群号。")
             return
-        if await self._run_daily_push(daily_config):
+        sent = await self._run_daily_push(daily_config)
+        if self._last_daily_source_empty:
+            return
+        if sent:
             yield event.plain_result("每日图片测试发送完成。")
         else:
             yield event.plain_result("每日图片测试发送失败，请检查日志。")
@@ -422,6 +548,9 @@ class SetuPlugin(Star):
                         MIN_SIZE,
                     )
                     yield event.image_result(image_path)
+            except NoImagesError:
+                await self._notify_no_images(source_dir, "/himg")
+                return
             except Exception as e:
                 yield event.plain_result(f"请求失败: {e}")
             return
@@ -435,6 +564,11 @@ class SetuPlugin(Star):
                     MIN_SIZE,
                 )
                 image_paths.append(image_path)
+        except NoImagesError:
+            await self._notify_no_images(source_dir, "/himg")
+            if image_paths:
+                yield make_forward_result(event, image_paths)
+            return
         except Exception as e:
             if image_paths:
                 yield make_forward_result(event, image_paths)
