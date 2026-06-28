@@ -59,7 +59,6 @@ git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
 
 | 命令 | 说明 |
 | --- | --- |
-| `/himg_umo` | 在目标群中获取该群的 UMO |
 | `/himg_daily_test` | 立即按当前配置执行一次主动发送测试 |
 
 ## 图片处理流程
@@ -118,23 +117,13 @@ git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enabled` | `false` | 是否启用每日主动发送 |
-| `targets` | `[]` | 目标群聊的完整 UMO 列表 |
+| `group_ids` | `[]` | 目标群号列表 |
 | `time` | `08:00` | 每天发送时间，使用系统本地时区 |
 | `count` | `1` | 每次发送图片数量 |
 | `merge_forward` | `false` | 是否打包成聊天记录 |
 | `forward_name` | `每日图片` | 合并转发节点显示名称 |
 
-目标群聊必须填写 AstrBot 的 `unified_msg_origin`，通常格式为：
-
-```text
-平台名:消息类型:群号
-```
-
-OneBot 群聊示例：
-
-```text
-aiocqhttp:GroupMessage:123456789
-```
+`group_ids` 中只需填写群号，例如 `"123456789"`。插件发送时会自动拼接为 `default:GroupMessage:123456789`。
 
 插件每天会随机处理 `count` 张图片，并将同一组图片发送到所有目标群。`count` 超过 `max_images` 时按 `max_images` 发送。开启合并转发后，OneBot 目标会收到一条聊天记录；其他平台自动回退为逐张发送。
 

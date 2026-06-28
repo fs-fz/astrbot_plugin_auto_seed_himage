@@ -50,10 +50,10 @@
         "description": "启用每日主动发送",
         "default": false
       },
-      "targets": {
+      "group_ids": {
         "type": "list",
-        "description": "目标群聊 UMO",
-        "hint": "填写完整的 unified_msg_origin，格式通常为 平台名:消息类型:群号，例如 aiocqhttp:GroupMessage:123456789。",
+        "description": "目标群号",
+        "hint": "填写需要每日发送图片的群号。插件会自动拼接为 default:GroupMessage:群号。",
         "default": []
       },
       "time": {

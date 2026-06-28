@@ -19,6 +19,7 @@ RENAME_LEN = 32
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 MERGE_FORWARD_PLATFORMS = {
     "aiocqhttp",
+    "default",
     "onebot",
     "qq",
     "qq_official",
@@ -143,16 +144,26 @@ def parse_daily_time(value: object) -> tuple[int, int] | None:
     return None
 
 
-def normalize_targets(value: object) -> list[str]:
+def normalize_group_ids(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return list(
         dict.fromkeys(
-            str(target).strip()
-            for target in value
-            if str(target).strip()
+            str(group_id).strip()
+            for group_id in value
+            if str(group_id).strip()
         )
     )
+
+
+def build_group_targets(value: object) -> list[str]:
+    targets = []
+    for group_id in normalize_group_ids(value):
+        if group_id.startswith("default:GroupMessage:"):
+            targets.append(group_id)
+        else:
+            targets.append(f"default:GroupMessage:{group_id}")
+    return targets
 
 
 def target_supports_merge_forward(target: str) -> bool:
@@ -164,7 +175,7 @@ def target_supports_merge_forward(target: str) -> bool:
     "astrbot_plugin_auto_seed_himage",
     "fsfz",
     "从本地获取随机图片。使用 /img 数量 获取图片。",
-    "1.6.0",
+    "1.6.1",
 )
 class SetuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -248,9 +259,10 @@ class SetuPlugin(Star):
             await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
 
     async def _run_daily_push(self, daily_config: dict) -> bool:
-        targets = normalize_targets(daily_config.get("targets", []))
+        group_ids = daily_config.get("group_ids", [])
+        targets = build_group_targets(group_ids)
         if not targets:
-            logger.warning("每日图片发送已启用，但未配置目标群聊 UMO。")
+            logger.warning("每日图片发送已启用，但未配置目标群号。")
             return False
 
         max_images = get_positive_int(
@@ -333,23 +345,13 @@ class SetuPlugin(Star):
         return sent_any
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("himg_umo")
-    async def show_group_umo(self, event: AstrMessageEvent):
-        """显示当前会话的 UMO，供每日发送配置使用。"""
-        if not event.get_group_id():
-            yield event.plain_result("请在目标群聊中使用此命令。")
-            return
-        yield event.plain_result(
-            f"当前群聊 UMO：{event.unified_msg_origin}"
-        )
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("himg_daily_test")
     async def test_daily_push(self, event: AstrMessageEvent):
         """立即测试每日主动发送配置。"""
         daily_config = self._get_daily_config()
-        if not normalize_targets(daily_config.get("targets", [])):
-            yield event.plain_result("尚未配置每日发送目标群聊 UMO。")
+        group_ids = daily_config.get("group_ids", [])
+        if not normalize_group_ids(group_ids):
+            yield event.plain_result("尚未配置每日发送目标群号。")
             return
         if await self._run_daily_push(daily_config):
             yield event.plain_result("每日图片测试发送完成。")
