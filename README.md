@@ -1,9 +1,111 @@
-# helloworld
+# astrbot_plugin_auto_seed_himage
 
-AstrBot 插件模板
+一个从本地目录随机选取并发送图片的 AstrBot 插件。
 
-A template plugin for AstrBot plugin feature
+用户发送 `/img 数量` 后，插件会随机选择指定数量的图片，修改文件哈希并将过小的图片扩充至指定大小，随后随机重命名并发送。
 
-# 支持
+## 功能
 
-- [插件开发文档](https://docs.astrbot.app/dev/star/plugin-new.html)
+- 从本地目录随机选择图片
+- 支持一次发送多张图片
+- 可配置单次请求数量上限
+- 支持用户黑名单或白名单访问控制
+- 通过追加随机字节修改图片文件哈希
+- 将小于 512 KiB 的图片扩充至目标大小
+- 使用随机文件名保存待发送图片
+- 支持 JPG、JPEG、PNG、WebP 和 GIF 格式
+
+## 安装
+
+通过 AstrBot 插件市场安装，或将本仓库克隆到 AstrBot 的插件目录：
+
+```bash
+git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
+```
+
+安装完成后，在 AstrBot 管理面板中启用或重载插件。
+
+## 目录准备
+
+插件默认使用以下路径：
+
+| 用途 | 路径 |
+| --- | --- |
+| 图片来源目录 | `/AstrBot/files/source` |
+| 处理后图片目录 | `/AstrBot/files/tmp` |
+
+将待发送的图片放入 `/AstrBot/files/source`。源目录必须存在，并且 AstrBot 进程需要拥有读写权限；目标目录会由插件自动创建。
+
+如果使用 Docker，请确保这些路径位于容器内部，或通过数据卷映射到对应目录。
+
+## 使用方法
+
+```text
+/img <数量>
+```
+
+例如，随机发送 3 张图片：
+
+```text
+/img 3
+```
+
+每张图片会作为一条独立消息发送。若目录不存在、没有可用图片或处理失败，插件会返回错误信息。
+
+## 图片处理流程
+
+每次发送图片时，插件会依次执行：
+
+1. 从源目录随机选择一张受支持的图片。
+2. 在文件末尾追加 16 个随机字节，以改变文件哈希。
+3. 如果文件小于 512 KiB，反复将文件内容追加到自身末尾，直到达到目标大小。
+4. 将文件重命名为 32 位随机字符串，并保留原扩展名。
+5. 将文件移动到目标目录并通过 AstrBot 发送。
+
+## 配置
+
+插件设置可在 AstrBot WebUI 的插件配置页面中修改：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `max_images` | `10` | 单次请求图片数量上限，最小有效值为 1 |
+| `source_dir` | `/AstrBot/files/source` | 图片来源目录 |
+| `target_dir` | `/AstrBot/files/tmp` | 处理后图片目录 |
+| `access_mode` | `disabled` | 访问控制模式 |
+| `user_ids` | `[]` | 用于黑名单或白名单匹配的用户 ID |
+
+修改后需要重载或重启插件。
+
+### 黑白名单
+
+`access_mode` 支持以下模式：
+
+- `disabled`：关闭访问限制，所有用户均可使用。
+- `blacklist`：`user_ids` 中的用户不可使用，其他用户可以使用。
+- `whitelist`：只有 `user_ids` 中的用户可以使用；名单为空时无人可以使用。
+
+`user_ids` 填写消息平台提供的用户 ID，按字符串精确匹配。例如：
+
+```json
+[
+  "123456789",
+  "987654321"
+]
+```
+
+## 注意事项
+
+- 插件会直接修改并移动源图片，而不是复制图片。发送后，原文件将不再位于源目录，请提前保留备份。
+- 请求的图片数量不能超过源目录中可用图片的数量，否则已处理的图片会正常发送，随后返回失败信息。
+- 单次请求数量受 `max_images` 限制，但仍建议根据平台发送频率限制合理设置。
+- 向图片末尾追加数据通常不影响常见图片查看器解析，但少数严格校验文件结构的平台或工具可能无法识别处理后的文件。
+- 请确保图片内容及使用方式符合所在平台规则和当地法律法规。
+
+## 许可证
+
+本项目采用 [GNU Affero General Public License v3.0](LICENSE) 开源。
+
+## 相关链接
+
+- [AstrBot](https://github.com/AstrBotDevs/AstrBot)
+- [AstrBot 插件开发文档](https://docs.astrbot.app/dev/star/plugin-new.html)
