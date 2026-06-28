@@ -1,10 +1,12 @@
+import asyncio
 import os
 import random
 import shutil
 import string
+from datetime import datetime
 
-from astrbot.api import AstrBotConfig
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Node, Nodes
 from astrbot.api.star import Context, Star, register
 
@@ -21,6 +23,8 @@ MERGE_FORWARD_PLATFORMS = {
     "qq",
     "qq_official",
 }
+DAILY_STATE_KEY = "daily_push_last_date"
+SCHEDULER_INTERVAL_SECONDS = 20
 
 
 def rand_str(n: int) -> str:
@@ -52,7 +56,11 @@ def make_self_image_seed(path: str) -> None:
         f.write(data)
 
 
-def process_one_image(source_dir: str, target_dir: str, min_size: int) -> str:
+def process_one_image(
+    source_dir: str,
+    target_dir: str,
+    min_size: int,
+) -> str:
     os.makedirs(target_dir, exist_ok=True)
 
     img_path = pick_random_image(source_dir)
@@ -113,18 +121,242 @@ def make_forward_result(event: AstrMessageEvent, image_paths: list[str]):
     return event.chain_result([Nodes(nodes=nodes)])
 
 
+def make_message_chain(components: list) -> MessageChain:
+    try:
+        return MessageChain(chain=components)
+    except TypeError:
+        message_chain = MessageChain()
+        message_chain.chain = components
+        return message_chain
+
+
+def parse_daily_time(value: object) -> tuple[int, int] | None:
+    parts = str(value).strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour, minute = (int(part) for part in parts)
+    except ValueError:
+        return None
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour, minute
+    return None
+
+
+def normalize_targets(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            str(target).strip()
+            for target in value
+            if str(target).strip()
+        )
+    )
+
+
+def target_supports_merge_forward(target: str) -> bool:
+    platform_name = target.split(":", 1)[0].lower()
+    return platform_name in MERGE_FORWARD_PLATFORMS
+
+
 @register(
     "astrbot_plugin_auto_seed_himage",
     "fsfz",
     "从本地获取随机图片。使用 /img 数量 获取图片。",
-    "1.5.0",
+    "1.6.0",
 )
 class SetuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+        self._scheduler_task = None
+        self._last_daily_run_date = ""
+        self._last_invalid_daily_time = None
 
-    @filter.command("img")
+    async def initialize(self):
+        """启动每日主动发送调度器。"""
+        if (
+            self._scheduler_task is not None
+            and not self._scheduler_task.done()
+        ):
+            return
+        try:
+            self._last_daily_run_date = await self.get_kv_data(
+                DAILY_STATE_KEY,
+                "",
+            )
+        except Exception as e:
+            logger.warning(f"读取每日发送状态失败，将仅在内存中去重: {e}")
+        self._scheduler_task = asyncio.create_task(self._daily_scheduler())
+
+    async def terminate(self):
+        """停止每日主动发送调度器。"""
+        if self._scheduler_task is None:
+            return
+        self._scheduler_task.cancel()
+        try:
+            await self._scheduler_task
+        except asyncio.CancelledError:
+            pass
+        self._scheduler_task = None
+
+    def _get_daily_config(self) -> dict:
+        daily_config = self.config.get("daily_push", {})
+        return daily_config if isinstance(daily_config, dict) else {}
+
+    async def _daily_scheduler(self):
+        while True:
+            try:
+                daily_config = self._get_daily_config()
+                if daily_config.get("enabled", False):
+                    scheduled_time = parse_daily_time(
+                        daily_config.get("time", "08:00")
+                    )
+                    if scheduled_time is None:
+                        invalid_value = str(daily_config.get("time", ""))
+                        if invalid_value != self._last_invalid_daily_time:
+                            logger.warning(
+                                "每日发送时间格式无效，应为 HH:MM: "
+                                f"{invalid_value}"
+                            )
+                            self._last_invalid_daily_time = invalid_value
+                    else:
+                        self._last_invalid_daily_time = None
+                        now = datetime.now().astimezone()
+                        today = now.date().isoformat()
+                        if (
+                            (now.hour, now.minute) == scheduled_time
+                            and self._last_daily_run_date != today
+                        ):
+                            if await self._run_daily_push(daily_config):
+                                self._last_daily_run_date = today
+                                try:
+                                    await self.put_kv_data(
+                                        DAILY_STATE_KEY,
+                                        today,
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"保存每日发送状态失败: {e}"
+                                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"每日图片调度器异常: {e}", exc_info=True)
+
+            await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
+
+    async def _run_daily_push(self, daily_config: dict) -> bool:
+        targets = normalize_targets(daily_config.get("targets", []))
+        if not targets:
+            logger.warning("每日图片发送已启用，但未配置目标群聊 UMO。")
+            return False
+
+        max_images = get_positive_int(
+            self.config,
+            "max_images",
+            DEFAULT_MAX_IMAGES,
+        )
+        image_count = get_positive_int(daily_config, "count", 1)
+        image_count = min(image_count, max_images)
+        source_dir = str(
+            self.config.get("source_dir", DEFAULT_SOURCE_DIR)
+            or DEFAULT_SOURCE_DIR
+        ).strip()
+        target_dir = str(
+            self.config.get("target_dir", DEFAULT_TARGET_DIR)
+            or DEFAULT_TARGET_DIR
+        ).strip()
+
+        image_paths = []
+        try:
+            for _ in range(image_count):
+                image_paths.append(
+                    process_one_image(source_dir, target_dir, MIN_SIZE)
+                )
+        except Exception as e:
+            if not image_paths:
+                logger.error(f"每日图片处理失败: {e}", exc_info=True)
+                return False
+            logger.warning(
+                f"每日图片仅成功处理 {len(image_paths)} 张，将发送已有图片: {e}"
+            )
+
+        merge_forward = bool(daily_config.get("merge_forward", False))
+        forward_name = str(
+            daily_config.get("forward_name", "每日图片")
+            or "每日图片"
+        ).strip()
+
+        sent_any = False
+        for target in targets:
+            try:
+                if merge_forward and target_supports_merge_forward(target):
+                    nodes = [
+                        Node(
+                            content=[make_image_component(image_path)],
+                            name=forward_name,
+                            uin=0,
+                        )
+                        for image_path in image_paths
+                    ]
+                    sent = await self.context.send_message(
+                        target,
+                        make_message_chain([Nodes(nodes=nodes)]),
+                    )
+                else:
+                    sent = True
+                    for image_path in image_paths:
+                        current_sent = await self.context.send_message(
+                            target,
+                            make_message_chain(
+                                [make_image_component(image_path)]
+                            ),
+                        )
+                        sent = sent and current_sent
+
+                if not sent:
+                    logger.warning(f"未找到每日图片目标会话: {target}")
+                else:
+                    sent_any = True
+            except Exception as e:
+                logger.error(
+                    f"向每日图片目标 {target} 发送失败: {e}",
+                    exc_info=True,
+                )
+        if sent_any:
+            logger.info(
+                f"每日图片发送完成: {len(image_paths)} 张, "
+                f"{len(targets)} 个目标"
+            )
+        return sent_any
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("himg_umo")
+    async def show_group_umo(self, event: AstrMessageEvent):
+        """显示当前会话的 UMO，供每日发送配置使用。"""
+        if not event.get_group_id():
+            yield event.plain_result("请在目标群聊中使用此命令。")
+            return
+        yield event.plain_result(
+            f"当前群聊 UMO：{event.unified_msg_origin}"
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("himg_daily_test")
+    async def test_daily_push(self, event: AstrMessageEvent):
+        """立即测试每日主动发送配置。"""
+        daily_config = self._get_daily_config()
+        if not normalize_targets(daily_config.get("targets", [])):
+            yield event.plain_result("尚未配置每日发送目标群聊 UMO。")
+            return
+        if await self._run_daily_push(daily_config):
+            yield event.plain_result("每日图片测试发送完成。")
+        else:
+            yield event.plain_result("每日图片测试发送失败，请检查日志。")
+
+    @filter.command("img", alias={"himg"})
     async def get_setu(self, event: AstrMessageEvent, num: int):
         """从本地目录随机获取指定数量的图片。"""
         access_mode = str(self.config.get("access_mode", "disabled"))
@@ -180,7 +412,11 @@ class SetuPlugin(Star):
         image_paths = []
         try:
             for _ in range(num):
-                image_path = process_one_image(source_dir, target_dir, MIN_SIZE)
+                image_path = process_one_image(
+                    source_dir,
+                    target_dir,
+                    MIN_SIZE,
+                )
                 image_paths.append(image_path)
         except Exception as e:
             if image_paths:
