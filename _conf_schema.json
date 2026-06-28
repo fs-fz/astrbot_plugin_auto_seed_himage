@@ -56,11 +56,13 @@
         "hint": "填写需要每日发送图片的群号。插件会自动拼接为 default:GroupMessage:群号。",
         "default": []
       },
-      "time": {
-        "type": "string",
-        "description": "每天发送时间",
-        "hint": "使用 AstrBot 所在系统的本地时区，格式为 HH:MM，例如 08:30。",
-        "default": "08:00"
+      "times": {
+        "type": "list",
+        "description": "每天发送时间列表",
+        "hint": "使用 AstrBot 所在系统的本地时区，每项格式为 HH:MM，例如 08:30、12:00、20:30。",
+        "default": [
+          "08:00"
+        ]
       },
       "count": {
         "type": "int",

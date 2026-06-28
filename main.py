@@ -24,7 +24,7 @@ MERGE_FORWARD_PLATFORMS = {
     "qq",
     "qq_official",
 }
-DAILY_STATE_KEY = "daily_push_last_date"
+DAILY_STATE_KEY = "daily_push_last_slot"
 SCHEDULER_INTERVAL_SECONDS = 20
 
 
@@ -144,6 +144,19 @@ def parse_daily_time(value: object) -> tuple[int, int] | None:
     return None
 
 
+def parse_daily_times(value: object) -> tuple[list[tuple[int, int]], list[str]]:
+    values = value if isinstance(value, list) else [value]
+    valid_times = []
+    invalid_values = []
+    for item in values:
+        parsed_time = parse_daily_time(item)
+        if parsed_time is None:
+            invalid_values.append(str(item))
+        elif parsed_time not in valid_times:
+            valid_times.append(parsed_time)
+    return sorted(valid_times), invalid_values
+
+
 def normalize_group_ids(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -175,15 +188,15 @@ def target_supports_merge_forward(target: str) -> bool:
     "astrbot_plugin_auto_seed_himage",
     "fsfz",
     "从本地获取随机图片。使用 /img 数量 获取图片。",
-    "1.6.1",
+    "1.7.0",
 )
 class SetuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self._scheduler_task = None
-        self._last_daily_run_date = ""
-        self._last_invalid_daily_time = None
+        self._last_daily_run_slot = ""
+        self._last_invalid_daily_times = None
 
     async def initialize(self):
         """启动每日主动发送调度器。"""
@@ -193,7 +206,7 @@ class SetuPlugin(Star):
         ):
             return
         try:
-            self._last_daily_run_date = await self.get_kv_data(
+            self._last_daily_run_slot = await self.get_kv_data(
                 DAILY_STATE_KEY,
                 "",
             )
@@ -221,36 +234,38 @@ class SetuPlugin(Star):
             try:
                 daily_config = self._get_daily_config()
                 if daily_config.get("enabled", False):
-                    scheduled_time = parse_daily_time(
-                        daily_config.get("time", "08:00")
+                    configured_times = daily_config.get(
+                        "times",
+                        ["08:00"],
                     )
-                    if scheduled_time is None:
-                        invalid_value = str(daily_config.get("time", ""))
-                        if invalid_value != self._last_invalid_daily_time:
+                    scheduled_times, invalid_values = parse_daily_times(
+                        configured_times
+                    )
+                    invalid_key = tuple(invalid_values)
+                    if invalid_key != self._last_invalid_daily_times:
+                        if invalid_values:
                             logger.warning(
-                                "每日发送时间格式无效，应为 HH:MM: "
-                                f"{invalid_value}"
+                                "以下每日发送时间格式无效，应为 HH:MM: "
+                                + ", ".join(invalid_values)
                             )
-                            self._last_invalid_daily_time = invalid_value
-                    else:
-                        self._last_invalid_daily_time = None
-                        now = datetime.now().astimezone()
-                        today = now.date().isoformat()
-                        if (
-                            (now.hour, now.minute) == scheduled_time
-                            and self._last_daily_run_date != today
-                        ):
-                            if await self._run_daily_push(daily_config):
-                                self._last_daily_run_date = today
-                                try:
-                                    await self.put_kv_data(
-                                        DAILY_STATE_KEY,
-                                        today,
-                                    )
-                                except Exception as e:
-                                    logger.warning(
-                                        f"保存每日发送状态失败: {e}"
-                                    )
+                        self._last_invalid_daily_times = invalid_key
+
+                    now = datetime.now().astimezone()
+                    current_time = (now.hour, now.minute)
+                    current_slot = now.strftime("%Y-%m-%d %H:%M")
+                    if (
+                        current_time in scheduled_times
+                        and self._last_daily_run_slot != current_slot
+                    ):
+                        await self._run_daily_push(daily_config)
+                        self._last_daily_run_slot = current_slot
+                        try:
+                            await self.put_kv_data(
+                                DAILY_STATE_KEY,
+                                current_slot,
+                            )
+                        except Exception as e:
+                            logger.warning(f"保存每日发送状态失败: {e}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
