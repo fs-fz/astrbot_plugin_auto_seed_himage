@@ -5,6 +5,13 @@ import shutil
 import string
 from datetime import datetime
 
+try:
+    from PIL import Image as PILImage
+    from PIL import ImageOps
+except ImportError:
+    PILImage = None
+    ImageOps = None
+
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Node, Nodes, Plain
@@ -17,6 +24,10 @@ MIN_SIZE = 512 * 1024
 HASH_APPEND_LEN = 16
 RENAME_LEN = 32
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+STITCH_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+MAX_STITCHED_SIZE = 20 * 1024 * 1024
+STITCH_GAP = 8
+STITCH_BACKGROUND = (255, 255, 255)
 MERGE_FORWARD_PLATFORMS = {
     "aiocqhttp",
     "default",
@@ -83,6 +94,165 @@ def process_one_image(
 
     shutil.move(img_path, target_path)
     return target_path
+
+
+def is_stitchable_image(image_path: str) -> bool:
+    ext = os.path.splitext(image_path)[1].lower()
+    if ext not in STITCH_IMAGE_EXTS:
+        return False
+    try:
+        with PILImage.open(image_path) as image:
+            if getattr(image, "is_animated", False):
+                return False
+            if getattr(image, "n_frames", 1) > 1:
+                return False
+    except Exception as e:
+        logger.warning(f"检查图片是否可拼接失败，将保留原图发送 {image_path}: {e}")
+        return False
+    return True
+
+
+def split_stitchable_images(image_paths: list[str]) -> tuple[list[str], list[str]]:
+    stitchable_paths = []
+    passthrough_paths = []
+    for image_path in image_paths:
+        if is_stitchable_image(image_path):
+            stitchable_paths.append(image_path)
+        else:
+            passthrough_paths.append(image_path)
+    return stitchable_paths, passthrough_paths
+
+
+def _load_stitch_image(image_path: str):
+    image = PILImage.open(image_path)
+    image = ImageOps.exif_transpose(image)
+    if image.mode in ("RGBA", "LA") or (
+        image.mode == "P" and "transparency" in image.info
+    ):
+        background = PILImage.new("RGB", image.size, STITCH_BACKGROUND)
+        background.paste(image.convert("RGBA"), mask=image.convert("RGBA").split()[-1])
+        image.close()
+        return background
+    return image.convert("RGB")
+
+
+def _save_compressed_jpeg(image, output_path: str) -> None:
+    for quality in (92, 88, 84, 80, 76, 72, 68, 64, 60, 56, 52, 48, 44, 40):
+        image.save(output_path, "JPEG", quality=quality, optimize=True)
+        if os.path.getsize(output_path) <= MAX_STITCHED_SIZE:
+            return
+
+    current = image
+    scale = 0.9
+    while os.path.getsize(output_path) > MAX_STITCHED_SIZE and scale >= 0.45:
+        resized = current.resize(
+            (
+                max(1, int(current.width * scale)),
+                max(1, int(current.height * scale)),
+            ),
+            PILImage.LANCZOS,
+        )
+        if current is not image:
+            current.close()
+        current = resized
+        current.save(output_path, "JPEG", quality=82, optimize=True)
+        scale -= 0.08
+
+    if current is not image:
+        current.close()
+
+
+def stitch_images(image_paths: list[str], target_dir: str) -> str | None:
+    if len(image_paths) <= 1:
+        return None
+    if PILImage is None:
+        logger.warning("Pillow 未安装，无法拼接图片，将按原方式发送。")
+        return None
+
+    images = []
+    resized_images = []
+    canvas = None
+    try:
+        for image_path in image_paths:
+            images.append(_load_stitch_image(image_path))
+
+        columns = min(3, max(1, int(len(images) ** 0.5 + 0.999)))
+        max_cell_width = min(1600, max(image.width for image in images))
+        for image in images:
+            if image.width > max_cell_width:
+                height = max(1, int(image.height * max_cell_width / image.width))
+                resized = image.resize((max_cell_width, height), PILImage.LANCZOS)
+                image.close()
+                resized_images.append(resized)
+            else:
+                resized_images.append(image)
+
+        rows = [
+            resized_images[index:index + columns]
+            for index in range(0, len(resized_images), columns)
+        ]
+        row_widths = [
+            sum(image.width for image in row) + STITCH_GAP * (len(row) - 1)
+            for row in rows
+        ]
+        row_heights = [max(image.height for image in row) for row in rows]
+        canvas_width = max(row_widths)
+        canvas_height = sum(row_heights) + STITCH_GAP * (len(rows) - 1)
+        canvas = PILImage.new(
+            "RGB",
+            (canvas_width, canvas_height),
+            STITCH_BACKGROUND,
+        )
+
+        y = 0
+        for row, row_height, row_width in zip(rows, row_heights, row_widths):
+            x = (canvas_width - row_width) // 2
+            for image in row:
+                canvas.paste(image, (x, y + (row_height - image.height) // 2))
+                x += image.width + STITCH_GAP
+            y += row_height + STITCH_GAP
+
+        os.makedirs(target_dir, exist_ok=True)
+        output_path = os.path.abspath(
+            os.path.join(target_dir, rand_str(RENAME_LEN) + "_stitched.jpg")
+        )
+        canvas.save(output_path, "JPEG", quality=95, optimize=True)
+        if os.path.getsize(output_path) > MAX_STITCHED_SIZE:
+            _save_compressed_jpeg(canvas, output_path)
+        return output_path
+    except Exception as e:
+        logger.error(f"拼接图片失败，将按原方式发送: {e}", exc_info=True)
+        return None
+    finally:
+        close_targets = {id(image): image for image in images + resized_images}
+        if canvas is not None:
+            close_targets[id(canvas)] = canvas
+        for image in close_targets.values():
+            try:
+                image.close()
+            except Exception:
+                pass
+
+
+def build_send_image_paths(
+    image_paths: list[str],
+    target_dir: str,
+    stitch_images_enabled: bool,
+) -> list[str]:
+    if not stitch_images_enabled or len(image_paths) <= 1:
+        return image_paths
+    if PILImage is None:
+        logger.warning("Pillow 未安装，无法拼接图片，将按原方式发送。")
+        return image_paths
+
+    stitchable_paths, passthrough_paths = split_stitchable_images(image_paths)
+    if len(stitchable_paths) <= 1:
+        return image_paths
+
+    stitched_image_path = stitch_images(stitchable_paths, target_dir)
+    if not stitched_image_path:
+        return image_paths
+    return [stitched_image_path] + passthrough_paths
 
 
 def is_user_allowed(access_mode: str, user_ids: list, sender_id: str) -> bool:
@@ -202,7 +372,7 @@ def target_supports_merge_forward(target: str) -> bool:
     "astrbot_plugin_auto_seed_himage",
     "fsfz",
     "从本地获取随机图片。使用 /img 数量 获取图片。",
-    "1.7.3",
+    "1.7.5",
 )
 class SetuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -313,6 +483,7 @@ class SetuPlugin(Star):
         ).strip()
 
         merge_forward = bool(daily_config.get("merge_forward", False))
+        stitch_images_enabled = bool(daily_config.get("stitch_images", False))
         forward_name = str(
             daily_config.get("forward_name", "每日图片")
             or "每日图片"
@@ -376,14 +547,29 @@ class SetuPlugin(Star):
             processed_count += len(image_paths)
 
             try:
-                if merge_forward and target_supports_merge_forward(target):
+                send_image_paths = build_send_image_paths(
+                    image_paths,
+                    target_dir,
+                    stitch_images_enabled,
+                )
+
+                if len(send_image_paths) == 1:
+                    sent = await self._send_daily_message(
+                        target,
+                        make_message_chain(
+                            [make_image_component(send_image_paths[0])]
+                        ),
+                        retry_count,
+                        retry_delay,
+                    )
+                elif merge_forward and target_supports_merge_forward(target):
                     nodes = [
                         Node(
                             content=[make_image_component(image_path)],
                             name=forward_name,
                             uin=0,
                         )
-                        for image_path in image_paths
+                        for image_path in send_image_paths
                     ]
                     sent = await self._send_daily_message(
                         target,
@@ -393,7 +579,7 @@ class SetuPlugin(Star):
                     )
                 else:
                     sent = True
-                    for image_index, image_path in enumerate(image_paths):
+                    for image_index, image_path in enumerate(send_image_paths):
                         current_sent = await self._send_daily_message(
                             target,
                             make_message_chain(
@@ -405,7 +591,7 @@ class SetuPlugin(Star):
                         sent = sent and current_sent
                         if (
                             send_interval
-                            and image_index < len(image_paths) - 1
+                            and image_index < len(send_image_paths) - 1
                         ):
                             await asyncio.sleep(send_interval)
 
@@ -533,6 +719,7 @@ class SetuPlugin(Star):
         ).strip()
 
         merge_forward = bool(self.config.get("merge_forward", False))
+        stitch_images_enabled = bool(self.config.get("stitch_images", False))
         platform_name = str(event.get_platform_name()).lower()
         use_merge_forward = (
             merge_forward
@@ -540,19 +727,31 @@ class SetuPlugin(Star):
         )
 
         if not use_merge_forward:
+            image_paths = []
             try:
                 for _ in range(num):
-                    image_path = process_one_image(
-                        source_dir,
-                        target_dir,
-                        MIN_SIZE,
+                    image_paths.append(
+                        process_one_image(
+                            source_dir,
+                            target_dir,
+                            MIN_SIZE,
+                        )
                     )
-                    yield event.image_result(image_path)
             except NoImagesError:
                 await self._notify_no_images(source_dir, "/himg")
-                return
             except Exception as e:
+                if not image_paths:
+                    yield event.plain_result(f"请求失败: {e}")
+                    return
                 yield event.plain_result(f"请求失败: {e}")
+
+            send_image_paths = build_send_image_paths(
+                image_paths,
+                target_dir,
+                stitch_images_enabled,
+            )
+            for image_path in send_image_paths:
+                yield event.image_result(image_path)
             return
 
         image_paths = []
@@ -567,12 +766,27 @@ class SetuPlugin(Star):
         except NoImagesError:
             await self._notify_no_images(source_dir, "/himg")
             if image_paths:
-                yield make_forward_result(event, image_paths)
+                send_image_paths = build_send_image_paths(
+                    image_paths,
+                    target_dir,
+                    stitch_images_enabled,
+                )
+                yield make_forward_result(event, send_image_paths)
             return
         except Exception as e:
             if image_paths:
-                yield make_forward_result(event, image_paths)
+                send_image_paths = build_send_image_paths(
+                    image_paths,
+                    target_dir,
+                    stitch_images_enabled,
+                )
+                yield make_forward_result(event, send_image_paths)
             yield event.plain_result(f"请求失败: {e}")
             return
 
-        yield make_forward_result(event, image_paths)
+        send_image_paths = build_send_image_paths(
+            image_paths,
+            target_dir,
+            stitch_images_enabled,
+        )
+        yield make_forward_result(event, send_image_paths)
