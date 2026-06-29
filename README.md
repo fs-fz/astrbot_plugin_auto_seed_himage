@@ -9,7 +9,7 @@
 - 从本地目录随机选择图片
 - 支持一次发送多张图片
 - 支持将多张图片打包成合并转发聊天记录
-- 支持将一次任务中的多张静态图片拼接成一张图发送
+- 支持将一次任务中的多张静态图片纵向拼接成一张图发送
 - 支持每天定时向多个群聊主动发送图片
 - 可配置单次请求数量上限
 - 支持用户黑名单或白名单访问控制
@@ -82,7 +82,7 @@ git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
 | `source_dir` | `/AstrBot/files/source` | 图片来源目录 |
 | `target_dir` | `/AstrBot/files/tmp` | 处理后图片目录 |
 | `merge_forward` | `false` | 是否打包成聊天记录 |
-| `stitch_images` | `false` | `/himg` 多张静态图片是否拼接成一张图 |
+| `stitch_images` | `false` | `/himg` 多张静态图片是否纵向拼接成一张图 |
 | `access_mode` | `disabled` | 访问控制模式 |
 | `user_ids` | `[]` | 用于黑名单或白名单匹配的用户 ID |
 | `daily_push` | 见下文 | 每日主动发送配置 |
@@ -97,7 +97,7 @@ git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
 
 ### 图片拼接
 
-开启 `stitch_images` 后，一次 `/himg N` 或 `/img N` 请求中如果成功抽到多张静态图片，插件会先把可拼接的静态图片拼接成一张 JPG，再交给后续发送逻辑。GIF、动图 WebP 等动态图片不会参与拼接，但会保留为单独图片继续发送。例如一次抽到 4 张 PNG 和 1 张 GIF 时，后续发送列表会变成 1 张拼接后的 JPG 和 1 张原 GIF；如果同时开启 `merge_forward`，这两张会一起放入聊天记录。
+开启 `stitch_images` 后，一次 `/himg N` 或 `/img N` 请求中如果成功抽到多张静态图片，插件会先把可拼接的静态图片按抽取顺序纵向拼接成一张 JPG，再交给后续发送逻辑。GIF、动图 WebP 等动态图片不会参与拼接，但会保留为单独图片继续发送。例如一次抽到 4 张 PNG 和 1 张 GIF 时，后续发送列表会变成 1 张纵向拼接后的 JPG 和 1 张原 GIF；如果同时开启 `merge_forward`，这两张会一起放入聊天记录。
 
 拼接后的图片如果超过 20MB，插件会自动降低 JPEG 质量并按比例缩小图片，尽量压到 20MB 以内。图片拼接依赖 `Pillow`，如果依赖未安装，插件会记录日志并按原发送方式回退。
 
@@ -129,7 +129,7 @@ git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
 | `times` | `["08:00"]` | 每天发送时间列表，使用系统本地时区 |
 | `count` | `1` | 每次发送图片数量 |
 | `merge_forward` | `false` | 是否打包成聊天记录 |
-| `stitch_images` | `false` | 每个群本次多张静态图片是否拼接成一张图 |
+| `stitch_images` | `false` | 每个群本次多张静态图片是否纵向拼接成一张图 |
 | `forward_name` | `每日图片` | 合并转发节点显示名称 |
 | `send_interval` | `3` | 群与群、同群多张图片之间的发送间隔（秒） |
 | `retry_count` | `1` | 单条消息发送失败后的额外重试次数 |
@@ -147,7 +147,7 @@ git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
 ]
 ```
 
-插件会在每天的每个时间点为每个目标群分别随机抽取并处理 `count` 张图片，因此不同群收到不同的图片。每张抽中的图片都会像 `/himg` 流程一样修改、扩容、随机重命名并从来源目录移动到目标目录。重复时间会自动去重；格式无效的时间会跳过并写入日志。`count` 超过 `max_images` 时按 `max_images` 发送。开启每日 `stitch_images` 后，每个群本次抽到的多张静态图片会优先拼接成一张图发送，GIF、动图 WebP 等会保留为单独图片。开启合并转发后，OneBot 目标会收到一条聊天记录；其他平台自动回退为逐张发送。
+插件会在每天的每个时间点为每个目标群分别随机抽取并处理 `count` 张图片，因此不同群收到不同的图片。每张抽中的图片都会像 `/himg` 流程一样修改、扩容、随机重命名并从来源目录移动到目标目录。重复时间会自动去重；格式无效的时间会跳过并写入日志。`count` 超过 `max_images` 时按 `max_images` 发送。开启每日 `stitch_images` 后，每个群本次抽到的多张静态图片会优先纵向拼接成一张图发送，GIF、动图 WebP 等会保留为单独图片。开启合并转发后，OneBot 目标会收到一条聊天记录；其他平台自动回退为逐张发送。
 
 例如配置 5 个群、每群发送 2 张时，每次定时任务需要来源目录中至少有 10 张图片，并会将这 10 张图片移动到目标目录。
 

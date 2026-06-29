@@ -176,7 +176,6 @@ def stitch_images(image_paths: list[str], target_dir: str) -> str | None:
         for image_path in image_paths:
             images.append(_load_stitch_image(image_path))
 
-        columns = min(3, max(1, int(len(images) ** 0.5 + 0.999)))
         max_cell_width = min(1600, max(image.width for image in images))
         for image in images:
             if image.width > max_cell_width:
@@ -187,17 +186,11 @@ def stitch_images(image_paths: list[str], target_dir: str) -> str | None:
             else:
                 resized_images.append(image)
 
-        rows = [
-            resized_images[index:index + columns]
-            for index in range(0, len(resized_images), columns)
-        ]
-        row_widths = [
-            sum(image.width for image in row) + STITCH_GAP * (len(row) - 1)
-            for row in rows
-        ]
-        row_heights = [max(image.height for image in row) for row in rows]
-        canvas_width = max(row_widths)
-        canvas_height = sum(row_heights) + STITCH_GAP * (len(rows) - 1)
+        canvas_width = max(image.width for image in resized_images)
+        canvas_height = (
+            sum(image.height for image in resized_images)
+            + STITCH_GAP * (len(resized_images) - 1)
+        )
         canvas = PILImage.new(
             "RGB",
             (canvas_width, canvas_height),
@@ -205,12 +198,10 @@ def stitch_images(image_paths: list[str], target_dir: str) -> str | None:
         )
 
         y = 0
-        for row, row_height, row_width in zip(rows, row_heights, row_widths):
-            x = (canvas_width - row_width) // 2
-            for image in row:
-                canvas.paste(image, (x, y + (row_height - image.height) // 2))
-                x += image.width + STITCH_GAP
-            y += row_height + STITCH_GAP
+        for image in resized_images:
+            x = (canvas_width - image.width) // 2
+            canvas.paste(image, (x, y))
+            y += image.height + STITCH_GAP
 
         os.makedirs(target_dir, exist_ok=True)
         output_path = os.path.abspath(
