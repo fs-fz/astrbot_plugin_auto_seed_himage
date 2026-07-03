@@ -667,15 +667,26 @@ class SetuPlugin(Star):
                 )
             processed_count += len(image_paths)
 
+            pdf_enabled = bool(daily_config.get("pdf_enabled", False))
             send_image_paths = []
             try:
-                send_image_paths = build_send_image_paths(
-                    image_paths,
-                    target_dir,
-                    stitch_images_enabled,
-                )
+                if pdf_enabled:
+                    # 只发 PDF：静态图进 PDF，动态图单发
+                    send_image_paths = [
+                        p for p in image_paths
+                        if not is_stitchable_image(p)
+                    ]
+                else:
+                    send_image_paths = build_send_image_paths(
+                        image_paths,
+                        target_dir,
+                        stitch_images_enabled,
+                    )
+                if not send_image_paths:
+                    # 全是静态图且已进 PDF，无需单独发图
+                    sent = True
 
-                if len(send_image_paths) == 1:
+                elif len(send_image_paths) == 1:
                     sent = await self._send_daily_message(
                         target,
                         make_message_chain(
@@ -685,7 +696,6 @@ class SetuPlugin(Star):
                         retry_delay,
                     )
                 elif merge_forward and target_supports_merge_forward(target):
-                    pdf_enabled = bool(daily_config.get("pdf_enabled", False))
                     nodes = []
                     pdf_path_cleanup = None
                     if pdf_enabled:
@@ -764,14 +774,13 @@ class SetuPlugin(Star):
                     exc_info=True,
                 )
 
-            pdf_enabled = bool(daily_config.get("pdf_enabled", False))
             # 合并转发时 PDF 已作为节点嵌入，这里不再单独发送
-            pdf_already_sent = (
-                merge_forward
+            pdf_in_forward = (
+                pdf_enabled
+                and merge_forward
                 and target_supports_merge_forward(target)
-                and len(send_image_paths) > 1
             )
-            if pdf_enabled and image_paths and not pdf_already_sent:
+            if pdf_enabled and image_paths and not pdf_in_forward:
                 try:
                     now = datetime.now().astimezone()
                     date_str = now.strftime("%y%m%d")
