@@ -663,6 +663,7 @@ class SetuPlugin(Star):
                 )
             processed_count += len(image_paths)
 
+            send_image_paths = []
             try:
                 send_image_paths = build_send_image_paths(
                     image_paths,
