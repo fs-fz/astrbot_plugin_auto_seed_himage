@@ -15,6 +15,12 @@
     "type": "string",
     "description": "处理后图片目录",
     "hint": "目录不存在时插件会自动创建。",
+    "default": "/AstrBot/files/tmp"
+  },
+  "pdf_dir": {
+    "type": "string",
+    "description": "PDF 输出目录",
+    "hint": "加密 PDF 会生成到这里。若使用 NapCat/OneBot 发送文件，请填写 AstrBot 和 NapCat 都能访问的共享目录。",
     "default": "/home/fsfz/files/napcat"
   },
   "merge_forward": {

@@ -33,7 +33,8 @@ except ImportError:
 from astrbot.api.star import Context, Star, register
 
 DEFAULT_SOURCE_DIR = "/AstrBot/files/source"
-DEFAULT_TARGET_DIR = "/home/fsfz/files/napcat"
+DEFAULT_TARGET_DIR = "/AstrBot/files/tmp"
+DEFAULT_PDF_DIR = "/home/fsfz/files/napcat"
 DEFAULT_MAX_IMAGES = 10
 MIN_SIZE = 512 * 1024
 HASH_APPEND_LEN = 16
@@ -295,6 +296,7 @@ def generate_encrypted_pdf(
 
     # 图片可能被 process_one_image 追加了随机字节和图种，img2pdf 无法解析。
     # 用 PIL 读取后保存干净副本再传入。
+    os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
     clean_paths = []
     clean_temp_files = []
     if PILImage is not None:
@@ -445,6 +447,16 @@ def get_non_negative_int(config: dict, key: str, default: int) -> int:
         return max(0, int(config.get(key, default)))
     except (TypeError, ValueError):
         return default
+
+
+def get_pdf_dir(config: AstrBotConfig, daily_config: dict | None = None) -> str:
+    daily_config = daily_config if isinstance(daily_config, dict) else {}
+    value = (
+        daily_config.get("pdf_dir")
+        or config.get("pdf_dir", DEFAULT_PDF_DIR)
+        or DEFAULT_PDF_DIR
+    )
+    return str(value).strip() or DEFAULT_PDF_DIR
 
 
 def make_image_component(file_path: str) -> Image:
@@ -645,6 +657,8 @@ class SetuPlugin(Star):
             or DEFAULT_TARGET_DIR
         ).strip()
 
+        pdf_dir = get_pdf_dir(self.config, daily_config)
+
         merge_forward = bool(daily_config.get("merge_forward", False))
         stitch_images_enabled = bool(daily_config.get("stitch_images", False))
         forward_name = str(
@@ -754,7 +768,7 @@ class SetuPlugin(Star):
                         if static_paths:
                             pdf_path = os.path.abspath(
                                 os.path.join(
-                                    target_dir,
+                                    pdf_dir,
                                     rand_str(RENAME_LEN) + "_daily.pdf",
                                 )
                             )
@@ -831,7 +845,7 @@ class SetuPlugin(Star):
                     pdf_sent = await self._send_daily_pdf(
                         target,
                         image_paths,
-                        target_dir,
+                        pdf_dir,
                         pdf_password,
                         pdf_filename,
                         retry_count,
@@ -913,7 +927,7 @@ class SetuPlugin(Star):
     def _make_himg_pdf_info(
         self,
         image_paths: list[str],
-        target_dir: str,
+        pdf_dir: str,
         sender_id: str,
     ):
         """生成 /himg 加密 PDF，返回 (pdf_path, pdf_filename, password)。
@@ -933,7 +947,7 @@ class SetuPlugin(Star):
         password = generate_himg_password()
         pdf_filename = f"{sender_id}_{num_images}_{password}.pdf"
         pdf_path = os.path.abspath(
-            os.path.join(target_dir, rand_str(RENAME_LEN) + "_himg.pdf")
+            os.path.join(pdf_dir, rand_str(RENAME_LEN) + "_himg.pdf")
         )
 
         result = generate_encrypted_pdf(static_paths, pdf_path, password)
@@ -976,11 +990,11 @@ class SetuPlugin(Star):
         self,
         event: AstrMessageEvent,
         image_paths: list[str],
-        target_dir: str,
+        pdf_dir: str,
         sender_id: str,
     ):
         """生成器：非合并转发时发送独立 PDF 消息。"""
-        pdf_info = self._make_himg_pdf_info(image_paths, target_dir, sender_id)
+        pdf_info = self._make_himg_pdf_info(image_paths, pdf_dir, sender_id)
         if pdf_info is None:
             return
 
@@ -1015,7 +1029,7 @@ class SetuPlugin(Star):
         self,
         target: str,
         image_paths: list[str],
-        target_dir: str,
+        pdf_dir: str,
         password: str,
         pdf_filename: str,
         retry_count: int,
@@ -1035,7 +1049,7 @@ class SetuPlugin(Star):
             return False
 
         pdf_path = os.path.abspath(
-            os.path.join(target_dir, rand_str(RENAME_LEN) + "_daily.pdf")
+            os.path.join(pdf_dir, rand_str(RENAME_LEN) + "_daily.pdf")
         )
 
         try:
@@ -1071,6 +1085,7 @@ class SetuPlugin(Star):
         event: AstrMessageEvent,
         image_paths: list[str],
         target_dir: str,
+        pdf_dir: str,
         stitch_images_enabled: bool,
     ):
         """生成器：构建含 PDF 节点的合并转发聊天记录并 yield。
@@ -1078,7 +1093,7 @@ class SetuPlugin(Star):
         仅当 himg_pdf_enabled 开启且有静态图时才包含 PDF 节点。
         """
         pdf_info = self._make_himg_pdf_info(
-            image_paths, target_dir, event.get_sender_id()
+            image_paths, pdf_dir, event.get_sender_id()
         )
         send_image_paths = build_send_image_paths(
             image_paths, target_dir, stitch_images_enabled
@@ -1155,6 +1170,8 @@ class SetuPlugin(Star):
             or DEFAULT_TARGET_DIR
         ).strip()
 
+        pdf_dir = get_pdf_dir(self.config)
+
         merge_forward = bool(self.config.get("merge_forward", False))
         stitch_images_enabled = bool(self.config.get("stitch_images", False))
         platform_name = str(event.get_platform_name()).lower()
@@ -1184,7 +1201,7 @@ class SetuPlugin(Star):
 
             if image_paths:
                 for _pdf_msg in self._send_himg_pdf(
-                    event, image_paths, target_dir, event.get_sender_id()
+                    event, image_paths, pdf_dir, event.get_sender_id()
                 ):
                     yield _pdf_msg
 
@@ -1210,20 +1227,20 @@ class SetuPlugin(Star):
             await self._notify_no_images(source_dir, "/himg")
             if image_paths:
                 for _result in self._make_forward_with_pdf(
-                    event, image_paths, target_dir, stitch_images_enabled
+                    event, image_paths, target_dir, pdf_dir, stitch_images_enabled
                 ):
                     yield _result
             return
         except Exception as e:
             if image_paths:
                 for _result in self._make_forward_with_pdf(
-                    event, image_paths, target_dir, stitch_images_enabled
+                    event, image_paths, target_dir, pdf_dir, stitch_images_enabled
                 ):
                     yield _result
             yield event.plain_result(f"请求失败: {e}")
             return
 
         for _result in self._make_forward_with_pdf(
-            event, image_paths, target_dir, stitch_images_enabled
+            event, image_paths, target_dir, pdf_dir, stitch_images_enabled
         ):
             yield _result
