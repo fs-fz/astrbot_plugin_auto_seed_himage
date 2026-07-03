@@ -3,7 +3,6 @@ import os
 import random
 import shutil
 import string
-import base64
 from datetime import datetime
 
 try:
@@ -293,14 +292,42 @@ def generate_encrypted_pdf(
         logger.warning("没有可用的图片文件用于生成 PDF。")
         return None
 
+    # 图片可能被 process_one_image 追加了随机字节和图种，img2pdf 无法解析。
+    # 用 PIL 读取后保存干净副本再传入。
+    clean_paths = []
+    clean_temp_files = []
+    if PILImage is not None:
+        for path in valid_paths:
+            try:
+                img = PILImage.open(path)
+                img.load()  # 强制解码，忽略尾部垃圾
+                clean_path = os.path.join(
+                    os.path.dirname(pdf_path),
+                    rand_str(16) + ".jpg",
+                )
+                img.convert("RGB").save(clean_path, "JPEG", quality=95)
+                clean_paths.append(clean_path)
+                clean_temp_files.append(clean_path)
+            except Exception as e:
+                logger.warning(f"无法清洗图片 {path}，跳过: {e}")
+    else:
+        clean_paths = valid_paths
+
+    if not clean_paths:
+        logger.warning("清洗后没有可用的图片用于生成 PDF。")
+        return None
+
     unencrypted_path = pdf_path + ".tmp"
     try:
-        pdf_bytes = img2pdf.convert(valid_paths)
+        pdf_bytes = img2pdf.convert(clean_paths)
         with open(unencrypted_path, "wb") as f:
             f.write(pdf_bytes)
     except Exception as e:
         logger.error(f"img2pdf 生成 PDF 失败: {e}", exc_info=True)
         return None
+    finally:
+        for p in clean_temp_files:
+            cleanup_file(p)
 
     try:
         if pikepdf is not None:
@@ -353,12 +380,10 @@ def build_pdf_message_chain(
         return make_message_chain([Plain(password_text)])
 
     try:
-        with open(pdf_path, "rb") as f:
-            file_b64 = base64.b64encode(f.read()).decode("utf-8")
-        file_uri = f"base64://{file_b64}"
+        # OneBot 适配器需要 file:// 路径，不能用 base64://
+        file_uri = f"file://{pdf_path}"
     except Exception as e:
-        logger.error(f"读取 PDF 文件进行 base64 编码失败: {e}", exc_info=True)
-        # 至少把密码发出去
+        logger.error(f"构建文件 URI 失败: {e}", exc_info=True)
         return make_message_chain([Plain(password_text)])
 
     return make_message_chain([
@@ -915,14 +940,12 @@ class SetuPlugin(Star):
         content = [Plain(f"PDF 密码: {password}\n文件名: {pdf_filename}")]
         if FileComponent is not None:
             try:
-                with open(pdf_path, "rb") as f:
-                    file_b64 = base64.b64encode(f.read()).decode("utf-8")
-                file_uri = f"base64://{file_b64}"
+                file_uri = f"file://{pdf_path}"
                 content.append(
                     FileComponent(name=pdf_filename, file=file_uri)
                 )
             except Exception as e:
-                logger.error(f"读取 PDF 文件构建节点失败: {e}", exc_info=True)
+                logger.error(f"构建 PDF 节点失败: {e}", exc_info=True)
                 # 至少保留密码文本
         return Node(
             content=content,
