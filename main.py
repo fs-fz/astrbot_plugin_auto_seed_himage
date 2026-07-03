@@ -344,10 +344,13 @@ def build_pdf_message_chain(
     pdf_filename: str,
     password_text: str,
 ):
-    """组装「密码文本 + PDF 文件」的消息链。File 组件不可用时返回 None。"""
+    """组装「密码文本 + PDF 文件」的消息链。
+
+    File 组件不可用时回退为纯文本（至少告知密码）。
+    """
     if FileComponent is None:
-        logger.warning("File 消息组件不可用，无法发送 PDF 文件。")
-        return None
+        logger.warning("File 消息组件不可用，将仅发送密码文本。")
+        return make_message_chain([Plain(password_text)])
 
     try:
         with open(pdf_path, "rb") as f:
@@ -355,7 +358,8 @@ def build_pdf_message_chain(
         file_uri = f"base64://{file_b64}"
     except Exception as e:
         logger.error(f"读取 PDF 文件进行 base64 编码失败: {e}", exc_info=True)
-        return None
+        # 至少把密码发出去
+        return make_message_chain([Plain(password_text)])
 
     return make_message_chain([
         Plain(password_text),
@@ -895,22 +899,27 @@ class SetuPlugin(Star):
         node_name: str,
         node_uin,
     ) -> Node | None:
-        """构建包含 PDF 文件和密码文本的聊天记录 Node。失败返回 None。"""
-        try:
-            with open(pdf_path, "rb") as f:
-                file_b64 = base64.b64encode(f.read()).decode("utf-8")
-            file_uri = f"base64://{file_b64}"
-            return Node(
-                content=[
-                    Plain(f"PDF 密码: {password}\n文件名: {pdf_filename}"),
-                    FileComponent(name=pdf_filename, file=file_uri),
-                ],
-                name=node_name,
-                uin=node_uin,
-            )
-        except Exception as e:
-            logger.error(f"构建 PDF 节点失败: {e}", exc_info=True)
-            return None
+        """构建包含 PDF 文件和密码文本的聊天记录 Node。
+
+        File 组件不可用时回退为仅含密码文本的 Node。
+        """
+        content = [Plain(f"PDF 密码: {password}\n文件名: {pdf_filename}")]
+        if FileComponent is not None:
+            try:
+                with open(pdf_path, "rb") as f:
+                    file_b64 = base64.b64encode(f.read()).decode("utf-8")
+                file_uri = f"base64://{file_b64}"
+                content.append(
+                    FileComponent(name=pdf_filename, file=file_uri)
+                )
+            except Exception as e:
+                logger.error(f"读取 PDF 文件构建节点失败: {e}", exc_info=True)
+                # 至少保留密码文本
+        return Node(
+            content=content,
+            name=node_name,
+            uin=node_uin,
+        )
 
     def _send_himg_pdf(
         self,
@@ -991,13 +1000,6 @@ class SetuPlugin(Star):
             message_chain = build_pdf_message_chain(
                 pdf_path, pdf_filename, password_text
             )
-            if message_chain is None:
-                logger.warning(
-                    f"每日图片 PDF 已生成 ({pdf_filename})，密码: {password}，"
-                    f"但 File 组件不可用，跳过发送到 {target}"
-                )
-                return False
-
             return await self._send_daily_message(
                 target,
                 message_chain,
