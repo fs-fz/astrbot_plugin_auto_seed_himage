@@ -3,6 +3,7 @@ import os
 import random
 import shutil
 import string
+import base64
 from datetime import datetime
 
 try:
@@ -12,9 +13,24 @@ except ImportError:
     PILImage = None
     ImageOps = None
 
+try:
+    import img2pdf
+except ImportError:
+    img2pdf = None
+
+try:
+    import pikepdf
+except ImportError:
+    pikepdf = None
+
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Node, Nodes, Plain
+
+try:
+    from astrbot.api.message_components import File as FileComponent
+except ImportError:
+    FileComponent = None
 from astrbot.api.star import Context, Star, register
 
 DEFAULT_SOURCE_DIR = "/AstrBot/files/source"
@@ -37,6 +53,7 @@ MERGE_FORWARD_PLATFORMS = {
 }
 DAILY_STATE_KEY = "daily_push_last_slot"
 SCHEDULER_INTERVAL_SECONDS = 20
+PDF_PASSWORD_LENGTH = 4
 EMPTY_IMAGE_NOTIFY_TARGET = "default:FriendMessage:393691734"
 
 
@@ -246,6 +263,115 @@ def build_send_image_paths(
     return [stitched_image_path] + passthrough_paths
 
 
+def generate_encrypted_pdf(
+    image_paths: list[str],
+    pdf_path: str,
+    password: str,
+) -> str | None:
+    """将图片列表生成加密 PDF。
+
+    先用 img2pdf 无损嵌入图片，再用 pypdf AES-256 加密。
+    加密失败时回退到未加密 PDF。
+
+    Returns:
+        pdf_path 成功，None 失败。
+    """
+    if img2pdf is None:
+        logger.warning("img2pdf 未安装，无法生成 PDF。请 pip install img2pdf。")
+        return None
+    if not image_paths:
+        logger.warning("没有图片，跳过 PDF 生成。")
+        return None
+
+    valid_paths = []
+    for path in image_paths:
+        if os.path.isfile(path) and path.lower().endswith(IMAGE_EXTS):
+            valid_paths.append(path)
+        else:
+            logger.warning(f"跳过无法用于 PDF 的文件: {path}")
+    if not valid_paths:
+        logger.warning("没有可用的图片文件用于生成 PDF。")
+        return None
+
+    unencrypted_path = pdf_path + ".tmp"
+    try:
+        pdf_bytes = img2pdf.convert(valid_paths)
+        with open(unencrypted_path, "wb") as f:
+            f.write(pdf_bytes)
+    except Exception as e:
+        logger.error(f"img2pdf 生成 PDF 失败: {e}", exc_info=True)
+        return None
+
+    try:
+        if pikepdf is not None:
+            with pikepdf.open(unencrypted_path) as pdf:
+                pdf.save(
+                    pdf_path,
+                    encryption=pikepdf.Encryption(
+                        user=password,
+                        owner=rand_str(16),
+                    ),
+                )
+        else:
+            logger.warning("pikepdf 未安装，回退为未加密 PDF。")
+            os.replace(unencrypted_path, pdf_path)
+    except Exception as e:
+        logger.error(f"PDF 加密失败: {e}", exc_info=True)
+        try:
+            os.replace(unencrypted_path, pdf_path)
+            logger.warning("加密失败，已回退为未加密 PDF。")
+            return pdf_path
+        except Exception as e2:
+            logger.error(f"回退 PDF 写入失败: {e2}")
+            return None
+    finally:
+        try:
+            if os.path.isfile(unencrypted_path):
+                os.remove(unencrypted_path)
+        except Exception:
+            pass
+
+    return pdf_path
+
+
+def generate_himg_password() -> str:
+    """生成 /himg PDF 的随机短密码（如 '4829'）。"""
+    return "".join(str(random.randint(0, 9)) for _ in range(PDF_PASSWORD_LENGTH))
+
+
+def build_pdf_message_chain(
+    pdf_path: str,
+    pdf_filename: str,
+    password_text: str,
+):
+    """组装「密码文本 + PDF 文件」的消息链。File 组件不可用时返回 None。"""
+    if FileComponent is None:
+        logger.warning("File 消息组件不可用，无法发送 PDF 文件。")
+        return None
+
+    try:
+        with open(pdf_path, "rb") as f:
+            file_b64 = base64.b64encode(f.read()).decode("utf-8")
+        file_uri = f"base64://{file_b64}"
+    except Exception as e:
+        logger.error(f"读取 PDF 文件进行 base64 编码失败: {e}", exc_info=True)
+        return None
+
+    return make_message_chain([
+        Plain(password_text),
+        FileComponent(name=pdf_filename, file=file_uri),
+    ])
+
+
+def cleanup_file(file_path: str) -> None:
+    """安全清理临时文件，不抛异常。"""
+    try:
+        if file_path and os.path.isfile(file_path):
+            os.remove(file_path)
+    except Exception as e:
+        logger.warning(f"清理临时文件失败 {file_path}: {e}")
+
+
 def is_user_allowed(access_mode: str, user_ids: list, sender_id: str) -> bool:
     configured_ids = {
         str(user_id).strip()
@@ -363,7 +489,7 @@ def target_supports_merge_forward(target: str) -> bool:
     "astrbot_plugin_auto_seed_himage",
     "fsfz",
     "从本地获取随机图片。使用 /img 数量 获取图片。",
-    "1.7.5",
+    "1.8.0",
 )
 class SetuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -554,20 +680,56 @@ class SetuPlugin(Star):
                         retry_delay,
                     )
                 elif merge_forward and target_supports_merge_forward(target):
-                    nodes = [
+                    pdf_enabled = bool(daily_config.get("pdf_enabled", False))
+                    nodes = []
+                    pdf_path_cleanup = None
+                    if pdf_enabled:
+                        now = datetime.now().astimezone()
+                        date_str = now.strftime("%y%m%d")
+                        pdf_password = date_str
+                        pdf_filename = (
+                            f"每日图片_{date_str}_密码是日期.pdf"
+                        )
+                        static_paths = [
+                            p for p in image_paths
+                            if is_stitchable_image(p)
+                        ]
+                        if static_paths:
+                            pdf_path = os.path.abspath(
+                                os.path.join(
+                                    target_dir,
+                                    rand_str(RENAME_LEN) + "_daily.pdf",
+                                )
+                            )
+                            if generate_encrypted_pdf(
+                                static_paths, pdf_path, pdf_password
+                            ):
+                                pdf_node = self._build_pdf_node(
+                                    pdf_path,
+                                    pdf_filename,
+                                    pdf_password,
+                                    forward_name,
+                                    0,
+                                )
+                                if pdf_node:
+                                    nodes.append(pdf_node)
+                                pdf_path_cleanup = pdf_path
+                    nodes.extend(
                         Node(
                             content=[make_image_component(image_path)],
                             name=forward_name,
                             uin=0,
                         )
                         for image_path in send_image_paths
-                    ]
+                    )
                     sent = await self._send_daily_message(
                         target,
                         make_message_chain([Nodes(nodes=nodes)]),
                         retry_count,
                         retry_delay,
                     )
+                    if pdf_path_cleanup:
+                        cleanup_file(pdf_path_cleanup)
                 else:
                     sent = True
                     for image_index, image_path in enumerate(send_image_paths):
@@ -596,6 +758,39 @@ class SetuPlugin(Star):
                     f"向每日图片目标 {target} 发送失败: {e}",
                     exc_info=True,
                 )
+
+            pdf_enabled = bool(daily_config.get("pdf_enabled", False))
+            # 合并转发时 PDF 已作为节点嵌入，这里不再单独发送
+            pdf_already_sent = (
+                merge_forward
+                and target_supports_merge_forward(target)
+                and len(send_image_paths) > 1
+            )
+            if pdf_enabled and image_paths and not pdf_already_sent:
+                try:
+                    now = datetime.now().astimezone()
+                    date_str = now.strftime("%y%m%d")
+                    pdf_password = date_str
+                    pdf_filename = f"每日图片_{date_str}_密码是日期.pdf"
+                    pdf_sent = await self._send_daily_pdf(
+                        target,
+                        image_paths,
+                        target_dir,
+                        pdf_password,
+                        pdf_filename,
+                        retry_count,
+                        retry_delay,
+                    )
+                    if pdf_sent:
+                        logger.info(
+                            f"每日图片 PDF 已发送到 {target}: {pdf_filename}"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"每日图片 PDF 发送失败 (目标: {target}): {e}",
+                        exc_info=True,
+                    )
+
             if source_empty:
                 await self._notify_no_images(
                     source_dir,
@@ -658,6 +853,203 @@ class SetuPlugin(Star):
                     f"每日图片发送最终失败 {target}: {error}"
                 )
         return False
+
+    def _make_himg_pdf_info(
+        self,
+        image_paths: list[str],
+        target_dir: str,
+        sender_id: str,
+    ):
+        """生成 /himg 加密 PDF，返回 (pdf_path, pdf_filename, password)。
+
+        失败返回 None。调用者负责清理 pdf_path。
+        """
+        if not bool(self.config.get("himg_pdf_enabled", False)):
+            return None
+        if not image_paths:
+            return None
+
+        static_paths = [p for p in image_paths if is_stitchable_image(p)]
+        if not static_paths:
+            return None
+
+        num_images = len(static_paths)
+        password = generate_himg_password()
+        pdf_filename = f"{sender_id}_{num_images}_{password}.pdf"
+        pdf_path = os.path.abspath(
+            os.path.join(target_dir, rand_str(RENAME_LEN) + "_himg.pdf")
+        )
+
+        result = generate_encrypted_pdf(static_paths, pdf_path, password)
+        if result is None:
+            return None
+
+        return pdf_path, pdf_filename, password, num_images
+
+    @staticmethod
+    def _build_pdf_node(
+        pdf_path: str,
+        pdf_filename: str,
+        password: str,
+        node_name: str,
+        node_uin,
+    ) -> Node | None:
+        """构建包含 PDF 文件和密码文本的聊天记录 Node。失败返回 None。"""
+        try:
+            with open(pdf_path, "rb") as f:
+                file_b64 = base64.b64encode(f.read()).decode("utf-8")
+            file_uri = f"base64://{file_b64}"
+            return Node(
+                content=[
+                    Plain(f"PDF 密码: {password}\n文件名: {pdf_filename}"),
+                    FileComponent(name=pdf_filename, file=file_uri),
+                ],
+                name=node_name,
+                uin=node_uin,
+            )
+        except Exception as e:
+            logger.error(f"构建 PDF 节点失败: {e}", exc_info=True)
+            return None
+
+    def _send_himg_pdf(
+        self,
+        event: AstrMessageEvent,
+        image_paths: list[str],
+        target_dir: str,
+        sender_id: str,
+    ):
+        """生成器：非合并转发时发送独立 PDF 消息。"""
+        pdf_info = self._make_himg_pdf_info(image_paths, target_dir, sender_id)
+        if pdf_info is None:
+            return
+
+        pdf_path, pdf_filename, password, num_images = pdf_info
+        try:
+            password_text = (
+                f"PDF 已加密，共 {num_images} 张图片。\n"
+                f"文件名: {pdf_filename}\n"
+                f"密码: {password}"
+            )
+            message_chain = build_pdf_message_chain(
+                pdf_path, pdf_filename, password_text
+            )
+            if message_chain is None:
+                yield event.plain_result(
+                    f"PDF 已生成 ({pdf_filename})，密码: {password}，"
+                    "但当前平台不支持发送文件。"
+                )
+                return
+
+            yield event.chain_result(message_chain.chain)
+        except Exception as e:
+            logger.error(f"/himg PDF 发送失败: {e}", exc_info=True)
+            try:
+                yield event.plain_result(f"加密 PDF 发送失败: {e}")
+            except Exception:
+                pass
+        finally:
+            cleanup_file(pdf_path)
+
+    async def _send_daily_pdf(
+        self,
+        target: str,
+        image_paths: list[str],
+        target_dir: str,
+        password: str,
+        pdf_filename: str,
+        retry_count: int,
+        retry_delay: int,
+    ) -> bool:
+        """生成每日推送加密 PDF 并通过 _send_daily_message 发送。
+
+        Returns:
+            True 发送成功，False 失败。
+        """
+        if not image_paths:
+            return False
+
+        # 只把静态图加入 PDF，动态图依旧单发
+        static_paths = [p for p in image_paths if is_stitchable_image(p)]
+        if not static_paths:
+            return False
+
+        pdf_path = os.path.abspath(
+            os.path.join(target_dir, rand_str(RENAME_LEN) + "_daily.pdf")
+        )
+
+        try:
+            result = generate_encrypted_pdf(static_paths, pdf_path, password)
+            if result is None:
+                return False
+
+            password_text = (
+                f"每日图片 PDF 已加密\n"
+                f"密码: {password}\n"
+                f"文件名: {pdf_filename}"
+            )
+            message_chain = build_pdf_message_chain(
+                pdf_path, pdf_filename, password_text
+            )
+            if message_chain is None:
+                logger.warning(
+                    f"每日图片 PDF 已生成 ({pdf_filename})，密码: {password}，"
+                    f"但 File 组件不可用，跳过发送到 {target}"
+                )
+                return False
+
+            return await self._send_daily_message(
+                target,
+                message_chain,
+                retry_count,
+                retry_delay,
+            )
+        except Exception as e:
+            logger.error(
+                f"每日图片 PDF 生成或发送失败 (目标: {target}): {e}",
+                exc_info=True,
+            )
+            return False
+        finally:
+            cleanup_file(pdf_path)
+
+    def _make_forward_with_pdf(
+        self,
+        event: AstrMessageEvent,
+        image_paths: list[str],
+        target_dir: str,
+        stitch_images_enabled: bool,
+    ):
+        """生成器：构建含 PDF 节点的合并转发聊天记录并 yield。
+
+        仅当 himg_pdf_enabled 开启且有静态图时才包含 PDF 节点。
+        """
+        pdf_info = self._make_himg_pdf_info(
+            image_paths, target_dir, event.get_sender_id()
+        )
+        send_image_paths = build_send_image_paths(
+            image_paths, target_dir, stitch_images_enabled
+        )
+        node_name = event.get_sender_name() or "随机图片"
+        node_uin = str(event.get_sender_id() or "")
+        nodes = []
+        if pdf_info:
+            pdf_path, pdf_filename, pdf_password, _ = pdf_info
+            pdf_node = self._build_pdf_node(
+                pdf_path, pdf_filename, pdf_password, node_name, node_uin
+            )
+            if pdf_node:
+                nodes.append(pdf_node)
+        for image_path in send_image_paths:
+            nodes.append(
+                Node(
+                    content=[make_image_component(image_path)],
+                    name=node_name,
+                    uin=node_uin,
+                )
+            )
+        yield event.chain_result([Nodes(nodes=nodes)])
+        if pdf_info:
+            cleanup_file(pdf_info[0])
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("himg_daily_test")
@@ -736,6 +1128,12 @@ class SetuPlugin(Star):
                     return
                 yield event.plain_result(f"请求失败: {e}")
 
+            if image_paths:
+                for _pdf_msg in self._send_himg_pdf(
+                    event, image_paths, target_dir, event.get_sender_id()
+                ):
+                    yield _pdf_msg
+
             send_image_paths = build_send_image_paths(
                 image_paths,
                 target_dir,
@@ -757,27 +1155,21 @@ class SetuPlugin(Star):
         except NoImagesError:
             await self._notify_no_images(source_dir, "/himg")
             if image_paths:
-                send_image_paths = build_send_image_paths(
-                    image_paths,
-                    target_dir,
-                    stitch_images_enabled,
-                )
-                yield make_forward_result(event, send_image_paths)
+                for _result in self._make_forward_with_pdf(
+                    event, image_paths, target_dir, stitch_images_enabled
+                ):
+                    yield _result
             return
         except Exception as e:
             if image_paths:
-                send_image_paths = build_send_image_paths(
-                    image_paths,
-                    target_dir,
-                    stitch_images_enabled,
-                )
-                yield make_forward_result(event, send_image_paths)
+                for _result in self._make_forward_with_pdf(
+                    event, image_paths, target_dir, stitch_images_enabled
+                ):
+                    yield _result
             yield event.plain_result(f"请求失败: {e}")
             return
 
-        send_image_paths = build_send_image_paths(
-            image_paths,
-            target_dir,
-            stitch_images_enabled,
-        )
-        yield make_forward_result(event, send_image_paths)
+        for _result in self._make_forward_with_pdf(
+            event, image_paths, target_dir, stitch_images_enabled
+        ):
+            yield _result

@@ -29,6 +29,12 @@
     "hint": "仅作用于 /himg 或 /img 指令。一次指令有多张静态图片时，会把可拼接的静态图片按抽取顺序纵向合并为一张；GIF、动图 WebP 等会保留为单独图片继续发送。拼接图超过 20MB 时会自动压缩。",
     "default": false
   },
+  "himg_pdf_enabled": {
+    "type": "bool",
+    "description": "导出加密 PDF (/himg)",
+    "hint": "开启后，执行 /himg 或 /img 指令时除发送图片外，额外生成一份带密码的 PDF 文件发送给用户。PDF 密码为 4 位随机数字。",
+    "default": false
+  },
   "access_mode": {
     "type": "string",
     "description": "用户访问控制模式",
@@ -86,6 +92,12 @@
         "type": "bool",
         "description": "多图纵向拼接成一张图片",
         "hint": "仅作用于每日主动发送。每个群本次抽到多张静态图片时，会把可拼接的静态图片按抽取顺序纵向合并为一张；GIF、动图 WebP 等会保留为单独图片继续发送。拼接图超过 20MB 时会自动压缩。",
+        "default": false
+      },
+      "pdf_enabled": {
+        "type": "bool",
+        "description": "导出加密 PDF (每日推送)",
+        "hint": "开启后，每日推送时除发送图片外，额外生成一份带密码的 PDF 文件发送到目标群。PDF 密码为当天日期（YYMMDD 格式，如 260701）。",
         "default": false
       },
       "forward_name": {
