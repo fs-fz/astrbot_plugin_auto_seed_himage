@@ -54,6 +54,7 @@ DAILY_STATE_KEY = "daily_push_last_slot"
 SCHEDULER_INTERVAL_SECONDS = 20
 PDF_PASSWORD_LENGTH = 4
 EMPTY_IMAGE_NOTIFY_TARGET = "default:FriendMessage:393691734"
+PDF_CLEANUP_DELAY_SECONDS = 300
 
 
 class NoImagesError(RuntimeError):
@@ -380,15 +381,16 @@ def build_pdf_message_chain(
         return make_message_chain([Plain(password_text)])
 
     try:
-        # OneBot 适配器需要 file:// 路径，不能用 base64://
-        file_uri = f"file://{pdf_path}"
+        file_path = os.path.abspath(pdf_path)
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(file_path)
     except Exception as e:
-        logger.error(f"构建文件 URI 失败: {e}", exc_info=True)
+        logger.error(f"PDF 文件不可用: {e}", exc_info=True)
         return make_message_chain([Plain(password_text)])
 
     return make_message_chain([
         Plain(password_text),
-        FileComponent(name=pdf_filename, file=file_uri),
+        FileComponent(name=pdf_filename, file=file_path),
     ])
 
 
@@ -399,6 +401,21 @@ def cleanup_file(file_path: str) -> None:
             os.remove(file_path)
     except Exception as e:
         logger.warning(f"清理临时文件失败 {file_path}: {e}")
+
+
+async def _cleanup_file_later(file_path: str, delay_seconds: int) -> None:
+    await asyncio.sleep(delay_seconds)
+    cleanup_file(file_path)
+
+
+def schedule_cleanup_file(
+    file_path: str,
+    delay_seconds: int = PDF_CLEANUP_DELAY_SECONDS,
+) -> None:
+    try:
+        asyncio.create_task(_cleanup_file_later(file_path, delay_seconds))
+    except RuntimeError:
+        cleanup_file(file_path)
 
 
 def is_user_allowed(access_mode: str, user_ids: list, sender_id: str) -> bool:
@@ -769,7 +786,7 @@ class SetuPlugin(Star):
                         retry_delay,
                     )
                     if pdf_path_cleanup:
-                        cleanup_file(pdf_path_cleanup)
+                        schedule_cleanup_file(pdf_path_cleanup)
                 else:
                     sent = True
                     for image_index, image_path in enumerate(send_image_paths):
@@ -940,9 +957,11 @@ class SetuPlugin(Star):
         content = [Plain(f"PDF 密码: {password}\n文件名: {pdf_filename}")]
         if FileComponent is not None:
             try:
-                file_uri = f"file://{pdf_path}"
+                file_path = os.path.abspath(pdf_path)
+                if not os.path.isfile(file_path):
+                    raise FileNotFoundError(file_path)
                 content.append(
-                    FileComponent(name=pdf_filename, file=file_uri)
+                    FileComponent(name=pdf_filename, file=file_path)
                 )
             except Exception as e:
                 logger.error(f"构建 PDF 节点失败: {e}", exc_info=True)
@@ -990,7 +1009,7 @@ class SetuPlugin(Star):
             except Exception:
                 pass
         finally:
-            cleanup_file(pdf_path)
+            schedule_cleanup_file(pdf_path)
 
     async def _send_daily_pdf(
         self,
@@ -1045,7 +1064,7 @@ class SetuPlugin(Star):
             )
             return False
         finally:
-            cleanup_file(pdf_path)
+            schedule_cleanup_file(pdf_path)
 
     def _make_forward_with_pdf(
         self,
@@ -1084,7 +1103,7 @@ class SetuPlugin(Star):
             )
         yield event.chain_result([Nodes(nodes=nodes)])
         if pdf_info:
-            cleanup_file(pdf_info[0])
+            schedule_cleanup_file(pdf_info[0])
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("himg_daily_test")
