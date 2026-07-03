@@ -33,7 +33,7 @@ except ImportError:
 from astrbot.api.star import Context, Star, register
 
 DEFAULT_SOURCE_DIR = "/AstrBot/files/source"
-DEFAULT_TARGET_DIR = "/AstrBot/files/tmp"
+DEFAULT_TARGET_DIR = "/home/fsfz/files/napcat"
 DEFAULT_MAX_IMAGES = 10
 MIN_SIZE = 512 * 1024
 HASH_APPEND_LEN = 16

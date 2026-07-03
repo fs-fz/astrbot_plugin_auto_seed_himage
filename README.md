@@ -35,7 +35,7 @@ git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
 | 用途 | 路径 |
 | --- | --- |
 | 图片来源目录 | `/AstrBot/files/source` |
-| 处理后图片目录 | `/AstrBot/files/tmp` |
+| 处理后图片目录 | `/home/fsfz/files/napcat` |
 
 将待发送的图片放入 `/AstrBot/files/source`。源目录必须存在，并且 AstrBot 进程需要拥有读写权限；目标目录会由插件自动创建。
 
@@ -80,7 +80,7 @@ git clone https://github.com/fs-fz/astrbot_plugin_auto_seed_himage.git
 | --- | --- | --- |
 | `max_images` | `10` | 单次请求图片数量上限，最小有效值为 1 |
 | `source_dir` | `/AstrBot/files/source` | 图片来源目录 |
-| `target_dir` | `/AstrBot/files/tmp` | 处理后图片目录 |
+| `target_dir` | `/home/fsfz/files/napcat` | 处理后图片目录 |
 | `merge_forward` | `false` | 是否打包成聊天记录 |
 | `stitch_images` | `false` | `/himg` 多张静态图片是否纵向拼接成一张图 |
 | `access_mode` | `disabled` | 访问控制模式 |
