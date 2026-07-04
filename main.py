@@ -954,7 +954,7 @@ class SetuPlugin(Star):
         if result is None:
             return None
 
-        return pdf_path, pdf_filename, password, num_images
+        return pdf_path, pdf_filename, password, num_images, static_paths
 
     @staticmethod
     def _build_pdf_node(
@@ -998,7 +998,7 @@ class SetuPlugin(Star):
         if pdf_info is None:
             return
 
-        pdf_path, pdf_filename, password, num_images = pdf_info
+        pdf_path, pdf_filename, password, num_images, static_paths = pdf_info
         try:
             password_text = (
                 f"PDF 已加密，共 {num_images} 张图片。\n"
@@ -1095,19 +1095,26 @@ class SetuPlugin(Star):
         pdf_info = self._make_himg_pdf_info(
             image_paths, pdf_dir, event.get_sender_id()
         )
-        send_image_paths = build_send_image_paths(
-            image_paths, target_dir, stitch_images_enabled
-        )
         node_name = event.get_sender_name() or "随机图片"
         node_uin = str(event.get_sender_id() or "")
         nodes = []
         if pdf_info:
-            pdf_path, pdf_filename, pdf_password, _ = pdf_info
+            pdf_path, pdf_filename, pdf_password, _, static_paths = pdf_info
             pdf_node = self._build_pdf_node(
                 pdf_path, pdf_filename, pdf_password, node_name, node_uin
             )
             if pdf_node:
                 nodes.append(pdf_node)
+        if pdf_info:
+            static_path_set = set(static_paths)
+            send_image_paths = [
+                path for path in image_paths
+                if path not in static_path_set
+            ]
+        else:
+            send_image_paths = build_send_image_paths(
+                image_paths, target_dir, stitch_images_enabled
+            )
         for image_path in send_image_paths:
             nodes.append(
                 Node(
@@ -1199,17 +1206,47 @@ class SetuPlugin(Star):
                     return
                 yield event.plain_result(f"请求失败: {e}")
 
+            pdf_static_paths = []
             if image_paths:
-                for _pdf_msg in self._send_himg_pdf(
-                    event, image_paths, pdf_dir, event.get_sender_id()
-                ):
-                    yield _pdf_msg
+                pdf_info = self._make_himg_pdf_info(
+                    image_paths,
+                    pdf_dir,
+                    event.get_sender_id(),
+                )
+                if pdf_info:
+                    pdf_path, pdf_filename, password, num_images, pdf_static_paths = pdf_info
+                    try:
+                        password_text = (
+                            f"PDF 已加密，共 {num_images} 张图片。\n"
+                            f"文件名: {pdf_filename}\n"
+                            f"密码: {password}"
+                        )
+                        message_chain = build_pdf_message_chain(
+                            pdf_path, pdf_filename, password_text
+                        )
+                        yield event.chain_result(message_chain.chain)
+                    except Exception as e:
+                        logger.error(f"/himg PDF 发送失败: {e}", exc_info=True)
+                        try:
+                            yield event.plain_result(f"加密 PDF 发送失败: {e}")
+                        except Exception:
+                            pass
+                        pdf_static_paths = []
+                    finally:
+                        schedule_cleanup_file(pdf_path)
 
-            send_image_paths = build_send_image_paths(
-                image_paths,
-                target_dir,
-                stitch_images_enabled,
-            )
+            if pdf_static_paths:
+                pdf_static_path_set = set(pdf_static_paths)
+                send_image_paths = [
+                    path for path in image_paths
+                    if path not in pdf_static_path_set
+                ]
+            else:
+                send_image_paths = build_send_image_paths(
+                    image_paths,
+                    target_dir,
+                    stitch_images_enabled,
+                )
             for image_path in send_image_paths:
                 yield event.image_result(image_path)
             return
